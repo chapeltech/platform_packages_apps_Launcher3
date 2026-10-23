@@ -77,6 +77,7 @@ import com.android.quickstep.AspectRatioSystemShortcut
 import com.android.quickstep.AutomationRepositoryImpl
 import com.android.quickstep.DesktopShortcut
 import com.android.quickstep.ExternalDisplayShortcut
+import com.android.quickstep.WonadSendShortcut
 import com.android.quickstep.InstantAppResolverImpl
 import com.android.quickstep.LauncherRestoreEventLoggerImpl
 import com.android.quickstep.QuickstepTestInformationHandler
@@ -331,6 +332,7 @@ object TaskOverlayModule {
     fun providePerTaskShortcutFactories(
         desktopShortcutFactory: DesktopShortcut.Factory,
         externalDisplayShortcutFactory: ExternalDisplayShortcut.Factory,
+        wonadSendShortcutFactory: WonadSendShortcut.Factory,
         aspectRatioSystemShortcutFactory: AspectRatioSystemShortcut.Factory,
         wellbeingShortcutFactory: WellbeingShortcut.Factory,
     ): List<TaskShortcutFactory> =
@@ -342,6 +344,7 @@ object TaskOverlayModule {
             TaskShortcutFactory.FREE_FORM,
             desktopShortcutFactory,
             externalDisplayShortcutFactory,
+            wonadSendShortcutFactory,
             aspectRatioSystemShortcutFactory,
             wellbeingShortcutFactory,
             TaskShortcutFactory.SAVE_APP_PAIR,
