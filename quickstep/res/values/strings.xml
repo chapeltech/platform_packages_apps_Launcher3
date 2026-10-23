@@ -31,6 +31,8 @@
     <string name="recent_split_task_option_desktop">Desktop for %1$s</string>
     <!-- Title and content description for an option to move app to external display. -->
     <string name="recent_task_option_external_display">Move to external display</string>
+    <string name="recent_task_option_send_to_wonad">Send to Wonad</string>
+    <string name="wonad_transfer_unavailable">Wonad could not move this app</string>
     <!-- Title and content description for an option to remove the task [CHAR LIMIT=30] -->
     <string name="recent_task_option_remove_task">Clear</string>
 
