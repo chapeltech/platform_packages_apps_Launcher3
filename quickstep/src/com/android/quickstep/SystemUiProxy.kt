@@ -1277,6 +1277,25 @@ constructor(
             desktopMode?.moveToExternalDisplay(taskId, transitionSource)
         }
 
+    /** Only a healthy Wonad session and the exact live phone task are offered
+     * by the OS. Recents never chooses a monitor or sends a window transaction.
+     */
+    fun canSendTaskToWonad(taskId: Int, userId: Int, lastActive: Long,
+        baseActivity: ComponentName?, taskToken: IBinder?): Boolean = try {
+        desktopMode?.canSendTaskToWonad(taskId, userId, lastActive, baseActivity, taskToken) == true
+    } catch (error: RemoteException) {
+        Log.w(TAG, "Failed call canSendTaskToWonad", error)
+        false
+    }
+
+    fun sendTaskToWonad(taskId: Int, userId: Int, lastActive: Long,
+        baseActivity: ComponentName?, taskToken: IBinder?): Boolean = try {
+        desktopMode?.sendTaskToWonad(taskId, userId, lastActive, baseActivity, taskToken) == true
+    } catch (error: RemoteException) {
+        Log.w(TAG, "Failed call sendTaskToWonad", error)
+        false
+    }
+
     //
     // Recents
     //
