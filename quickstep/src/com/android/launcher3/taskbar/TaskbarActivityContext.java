@@ -334,9 +334,11 @@ public class TaskbarActivityContext extends BaseTaskbarContext {
             TaskbarNavButtonController buttonController,
             ScopedUnfoldTransitionProgressProvider unfoldTransitionProgressProvider,
             boolean isPrimaryDisplay, int primaryDisplayId, SystemUiProxy sysUiProxy,
-            ActivityManagerWrapper activityManagerWrapper, DesktopState desktopState) {
+            ActivityManagerWrapper activityManagerWrapper, DesktopState desktopState,
+            @Nullable TaskbarFeatureEvaluator preparedEvaluator) {
         super(windowContext, displayId, isPrimaryDisplay);
-        mTaskbarFeatureEvaluator = getActivityComponent().getTaskbarFeatureEvaluator();
+        mTaskbarFeatureEvaluator = preparedEvaluator != null ? preparedEvaluator
+                : getActivityComponent().getTaskbarFeatureEvaluator();
         mIsTransient = mTaskbarFeatureEvaluator.isTransient();
         mIsPinned = mTaskbarFeatureEvaluator.isPinned();
         mTaskbarUiState = TaskbarUiStateMonitor.INSTANCE.get(this).getTaskbarUiState(displayId);
