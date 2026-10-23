@@ -429,8 +429,7 @@ public class TaskbarManagerImpl {
                 return null;
             }
 
-            if (!DesktopExperienceFlags.ENABLE_SYS_DECORS_CALLBACKS_VIA_WM.isTrue()
-                    && !wm.shouldShowSystemDecors(displayId)) {
+            if (!wm.shouldShowSystemDecors(displayId)) {
                 debugTaskbarManager(
                         "initPerDisplayResource: shouldShowSystemDecors="
                                 + wm.shouldShowSystemDecors(displayId), displayId);
@@ -718,6 +717,17 @@ public class TaskbarManagerImpl {
             PerDisplayTaskbarResource resource, int duration, String caller) {
         Preconditions.assertTaskbarUiThread();
         resource.debugMsg("recreateTaskbarForDisplay");
+        // Decoration removal can race already queued configuration callbacks.
+        // Recheck native ownership before asking the per-display repository for
+        // objects which it has already removed. Never recreate an external
+        // Android taskbar on a screen claimed by Wonad.
+        WindowManager wm = mBaseContext.getSystemService(WindowManager.class);
+        if (resource.isExternalDisplay()
+                && (wm == null || !wm.shouldShowSystemDecors(resource.getDisplayId()))) {
+            resource.destroyTaskbarForDisplay();
+            resource.removeTaskbarRootViewFromWindow();
+            return;
+        }
         String traceName = "recreateTaskbarForDisplay: caller=" + caller;
         String traceNameTruncated = traceName.substring(0, Math.min(traceName.length(), 80));
         Trace.beginSection(traceNameTruncated);
@@ -802,11 +812,23 @@ public class TaskbarManagerImpl {
             }
 
             resource.debugMsg("recreateTaskbarForDisplay: adding rootView");
+            if (resource.isExternalDisplay()
+                    && (wm == null || !wm.shouldShowSystemDecors(displayId))) {
+                taskbar.onDestroy();
+                taskbar = null;
+                resource.removeTaskbarRootViewFromWindow();
+                return;
+            }
             FrameLayout taskbarRootLayout = resource.getRootLayout();
             resource.debugMsg("recreateTaskbarForDisplay: adding root layout");
             taskbarRootLayout.removeAllViews();
 
             resource.setCurrentTaskbar(taskbar);
+            if (resource.isExternalDisplay() && resource.getTaskbar() != taskbar) {
+                // A synchronous final-admission rejection already destroyed it.
+                taskbar = null;
+                return;
+            }
             taskbarRootLayout.addView(taskbar.getDragLayer());
             taskbarRootLayout.setVisibility(getTaskbarVisibility(taskbar.isUserSetupComplete()));
             taskbar.notifyUpdateLayoutParams();
@@ -1073,6 +1095,13 @@ public class TaskbarManagerImpl {
                 return null;
             }
 
+            var evaluator = resource.isExternalDisplay()
+                    ? resource.taskbarFeatureEvaluatorOrRetry(() -> recreateTaskbarForDisplay(
+                            resource, 0, "displayDependencyReady")) : null;
+            if (resource.isExternalDisplay() && evaluator == null) {
+                return null;
+            }
+
             Context navigationBarPanelContext = mBaseContext.createWindowContext(display,
                     TYPE_NAVIGATION_BAR_PANEL, null);
 
@@ -1085,7 +1114,7 @@ public class TaskbarManagerImpl {
                     new TaskbarActivityContext(displayId, windowContext, navigationBarPanelContext,
                             dp, resource.getNavButtonController(), mUnfoldProgressProvider,
                             !resource.isExternalDisplay(), getPrimaryDisplayId(),
-                            mSystemUiProxy, mActivityManagerWrapper, mDesktopState);
+                            mSystemUiProxy, mActivityManagerWrapper, mDesktopState, evaluator);
             mAmbientCueRepository = taskbarActivityContext.getControllers().cueBarController
                     .getAmbientCueRepository();
             return taskbarActivityContext;

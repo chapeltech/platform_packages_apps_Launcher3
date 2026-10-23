@@ -5929,6 +5929,25 @@ public abstract class RecentsView<
         successCallback.run();
     }
 
+    /** The phone Recents card supplies only observations. Shell validates the
+     * exact live task and chooses Wonad's last-focused external monitor after
+     * Overview has returned input focus to the phone.
+     */
+    public void sendTaskToWonad(TaskContainer taskContainer) {
+        final TaskKey selected = taskContainer.getTask().key;
+        switchToScreenshot(() -> finishRecentsAnimation(/* toHome= */true, /* shouldPip= */false,
+                () -> {
+                    if (mSystemUiProxy.sendTaskToWonad(selected.id, selected.userId,
+                            selected.lastActiveTime, selected.baseActivity,
+                            selected.token == null ? null : selected.token.asBinder())) {
+                        dismissTaskView(taskContainer.getTaskView(), /*removeTask*/ false);
+                    } else {
+                        Toast.makeText(getContext(), R.string.wonad_transfer_unavailable,
+                                Toast.LENGTH_SHORT).show();
+                    }
+                }));
+    }
+
 
     // Logs when the orientation of Overview changes. We log both real and fake orientation changes.
     private void logOrientationChanged() {
