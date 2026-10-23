@@ -130,6 +130,7 @@ constructor(
         type: CommandType,
         displayId: Int = DEFAULT_DISPLAY,
         isLastOfBatch: Boolean = true,
+        executionGuard: (() -> Boolean)? = null,
     ): CommandInfo? {
         if (commandQueue.size >= MAX_QUEUE_SIZE) {
             OverviewCommandHelperProtoLogProxy.logCommandQueueFull(type, commandQueue)
@@ -143,6 +144,7 @@ constructor(
                 createTime = elapsedRealtime(),
                 isLastOfBatch = isLastOfBatch,
                 statusChangedCallback = this::onCommandStatusChanged,
+                executionGuard = executionGuard,
             )
         commandQueue.add(command)
         OverviewCommandHelperProtoLogProxy.logCommandAdded(command)
@@ -205,6 +207,11 @@ constructor(
                 return@traceSection
             }
 
+            if (!command.isExecutionAllowed()) {
+                commandQueue.remove(command)
+                processNextCommand()
+                return@traceSection
+            }
             command.status = CommandStatus.PROCESSING
             OverviewCommandHelperProtoLogProxy.logExecutingCommand(command)
 
@@ -225,6 +232,7 @@ constructor(
      */
     @VisibleForTesting
     fun executeCommand(command: CommandInfo, onCallbackResult: () -> Unit): Boolean {
+        if (!command.isExecutionAllowed()) return true
         val recentsView = getVisibleRecentsView(command.displayId)
         OverviewCommandHelperProtoLogProxy.logExecutingCommand(command, recentsView)
         return if (recentsView != null) {
@@ -246,7 +254,8 @@ constructor(
                     isCompleted,
                 )
                 if (isCompleted) {
-                    continuation.resume(Unit)
+                    if (!command.hasExecutionGuard() || continuation.isActive)
+                        continuation.resume(Unit)
                 } else {
                     OverviewCommandHelperProtoLogProxy.logWaitingForCommandCallback(command)
                 }
@@ -296,7 +305,7 @@ constructor(
                         getNextToggledTaskView(recentsView, command.displayId),
                         command,
                     ) {
-                        if (runningTaskId != null) {
+                        if (runningTaskId != null && command.isExecutionAllowed()) {
                             lastToggleInfo[command.displayId] =
                                 ToggleInfo(command.createTime, runningTaskId)
                         }
@@ -610,6 +619,10 @@ constructor(
                     targets: RecentsAnimationTargets,
                     transitionInfo: TransitionInfo?,
                 ) {
+                    if (!command.isExecutionAllowed()) {
+                        command.removeListener(this)
+                        return
+                    }
                     OverviewCommandHelperProtoLogProxy.logRecentsAnimStarted(command)
                     if (gestureEndTarget == GestureEndTarget.RECENTS) {
                         if (recentsViewContainer is RecentsWindowManager) {
@@ -625,6 +638,7 @@ constructor(
                         logShowOverviewFrom(command)
                     }
                     containerInterface.runOnInitBackgroundStateUI {
+                        if (!command.isExecutionAllowed()) return@runOnInitBackgroundStateUI
                         OverviewCommandHelperProtoLogProxy.logOnInitBackgroundStateUI(command)
                         interactionHandler.onGestureEnded(
                             0f,
@@ -642,6 +656,7 @@ constructor(
                     interactionHandler.onGestureCancelled()
                     command.removeListener(this)
 
+                    if (!command.isExecutionAllowed()) return
                     containerInterface.getCreatedContainer() ?: return
                     recentsView?.onRecentsAnimationComplete()
                 }
@@ -692,6 +707,12 @@ constructor(
 
     /** Called when the command finishes execution. */
     private fun onCommandFinished(command: CommandInfo) {
+        if (!command.isExecutionAllowed()) {
+            val wasHead = commandQueue.firstOrNull() === command
+            commandQueue.remove(command)
+            if (wasHead) processNextCommand()
+            return
+        }
         command.status = CommandStatus.COMPLETED
         if (commandQueue.firstOrNull() !== command) {
             OverviewCommandHelperProtoLogProxy.logCommandFinishedButNotScheduled(
@@ -707,6 +728,12 @@ constructor(
     }
 
     private fun cancelCommand(command: CommandInfo, throwable: Throwable?) {
+        if (!command.isExecutionAllowed()) {
+            val wasHead = commandQueue.firstOrNull() === command
+            commandQueue.remove(command)
+            if (wasHead) processNextCommand()
+            return
+        }
         command.status = CommandStatus.CANCELED
         OverviewCommandHelperProtoLogProxy.logCommandCanceled(command, throwable)
         commandQueue.remove(command)
@@ -714,6 +741,7 @@ constructor(
     }
 
     private fun onCommandStatusChanged(command: CommandInfo) {
+        if (!command.isExecutionAllowed()) return
         when (command.type) {
             TOGGLE,
             TOGGLE_OVERVIEW_PREVIOUS,
@@ -737,6 +765,7 @@ constructor(
     }
 
     private fun updateRecentsViewFocus(command: CommandInfo) {
+        if (!command.isExecutionAllowed()) return
         val recentsView: RecentsView<*, *> = getVisibleRecentsView(command.displayId) ?: return
         if (
             command.type != SHOW_ALT_TAB &&
@@ -754,17 +783,27 @@ constructor(
         if (recentsView.isAttachedToWindow) {
             recentsView.viewRootImpl.touchModeChanged(false)
         } else {
-            recentsView.post { recentsView.viewRootImpl.touchModeChanged(false) }
+            recentsView.post {
+                if (command.isExecutionAllowed()) recentsView.viewRootImpl.touchModeChanged(false)
+            }
         }
         // Ensure that recents view has focus so that it receives the followup key inputs
         // Stops requesting focused after first view gets focused.
-        recentsView.keyboardFocusTaskView.requestFocus() ||
-            recentsView.nextTaskView.requestFocus() ||
-            recentsView.firstTaskView.requestFocus() ||
-            recentsView.requestFocus()
+        if (command.hasExecutionGuard()) {
+            recentsView.keyboardFocusTaskView.requestFocus(command) ||
+                recentsView.nextTaskView.requestFocus(command) ||
+                recentsView.firstTaskView.requestFocus(command) ||
+                recentsView.requestFocus(command)
+        } else {
+            recentsView.keyboardFocusTaskView.requestFocus() ||
+                recentsView.nextTaskView.requestFocus() ||
+                recentsView.firstTaskView.requestFocus() ||
+                recentsView.requestFocus()
+        }
     }
 
     private fun onRecentsViewFocusUpdated(command: CommandInfo) {
+        if (!command.isExecutionAllowed()) return
         val recentsView: RecentsView<*, *> = getVisibleRecentsView(command.displayId) ?: return
         if (command.type == HIDE_ALT_TAB && keyboardFocusTask !is KeyboardFocusTask.Unfocused) {
             recentsView.currentPage = recentsView.indexOfChild(recentsView.keyboardFocusTaskView)
@@ -782,7 +821,18 @@ constructor(
         return true
     }
 
+    private fun View?.requestFocus(command: CommandInfo): Boolean {
+        if (this == null || !command.isExecutionAllowed()) return false
+        return post {
+            if (command.isExecutionAllowed()) {
+                requestFocus()
+                requestAccessibilityFocus()
+            }
+        }
+    }
+
     private fun logShowOverviewFrom(command: CommandInfo) {
+        if (!command.isExecutionAllowed()) return
         val containerInterface = getContainerInterface(command.displayId) ?: return
         val container = containerInterface.getCreatedContainer() ?: return
         val event =
@@ -820,7 +870,12 @@ constructor(
         val displayId: Int = DEFAULT_DISPLAY,
         val isLastOfBatch: Boolean = true,
         val statusChangedCallback: (CommandInfo) -> Unit,
+        private val executionGuard: (() -> Boolean)? = null,
     ) {
+        fun hasExecutionGuard(): Boolean = executionGuard != null
+        fun isExecutionAllowed(): Boolean = try { executionGuard?.invoke() ?: true }
+            catch (_: RuntimeException) { false }
+
 
         var status: CommandStatus = CommandStatus.IDLE
             set(value) {
