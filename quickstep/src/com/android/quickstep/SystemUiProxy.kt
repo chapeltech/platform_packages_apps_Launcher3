@@ -134,6 +134,14 @@ constructor(
     private var splitScreen: ISplitScreen? = null
     private var oneHanded: IOneHanded? = null
     private var shellTransitions: IShellTransitions? = null
+    internal class FocusQueryConnection internal constructor(
+        val transitions: IShellTransitions,
+        val binder: IBinder,
+        val epoch: Long,
+    )
+    private var focusQueryEpoch = 0L // MAIN only
+    @Volatile internal var focusQueryConnection: FocusQueryConnection? = null
+        private set
     private var startingWindow: IStartingWindow? = null
     private var recentTasks: IRecentTasks? = null
     private var backAnimation: IBackAnimation? = null
@@ -318,6 +326,10 @@ constructor(
         oneHanded = Stub.asInterface(params.getBinder(IOneHanded.DESCRIPTOR))
         shellTransitions =
             IShellTransitions.Stub.asInterface(params.getBinder(IShellTransitions.DESCRIPTOR))
+        focusQueryConnection = if (focusQueryEpoch == Long.MAX_VALUE) null else {
+            focusQueryEpoch++
+            shellTransitions?.let { FocusQueryConnection(it, it.asBinder(), focusQueryEpoch) }
+        }
         startingWindow =
             IStartingWindow.Stub.asInterface(params.getBinder(IStartingWindow.DESCRIPTOR))
         sysuiUnlockAnimationController =
@@ -1276,6 +1288,25 @@ constructor(
         executeWithErrorLog({ "Failed call moveToExternalDisplay" }) {
             desktopMode?.moveToExternalDisplay(taskId, transitionSource)
         }
+
+    /** Only a healthy Wonad session and the exact live phone task are offered
+     * by the OS. Recents never chooses a monitor or sends a window transaction.
+     */
+    fun canSendTaskToWonad(taskId: Int, userId: Int, lastActive: Long,
+        baseActivity: ComponentName?, taskToken: IBinder?): Boolean = try {
+        desktopMode?.canSendTaskToWonad(taskId, userId, lastActive, baseActivity, taskToken) == true
+    } catch (error: RemoteException) {
+        Log.w(TAG, "Failed call canSendTaskToWonad", error)
+        false
+    }
+
+    fun sendTaskToWonad(taskId: Int, userId: Int, lastActive: Long,
+        baseActivity: ComponentName?, taskToken: IBinder?): Boolean = try {
+        desktopMode?.sendTaskToWonad(taskId, userId, lastActive, baseActivity, taskToken) == true
+    } catch (error: RemoteException) {
+        Log.w(TAG, "Failed call sendTaskToWonad", error)
+        false
+    }
 
     //
     // Recents
