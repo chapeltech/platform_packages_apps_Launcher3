@@ -20,6 +20,7 @@ import android.content.Context
 import android.graphics.Region
 import android.os.Bundle
 import android.os.IRemoteCallback
+import android.os.Looper
 import android.os.RemoteException
 import android.util.Log
 import android.view.Display
@@ -35,6 +36,7 @@ import com.android.launcher3.util.LockedUserState
 import com.android.launcher3.util.PostUnlockObject
 import com.android.launcher3.util.ThreadSafeRunnableList
 import com.android.quickstep.OverviewCommandHelper
+import com.android.quickstep.OverviewCommandHelper.CommandType
 import com.android.quickstep.OverviewCommandHelper.CommandType.HIDE_ALT_TAB
 import com.android.quickstep.OverviewCommandHelper.CommandType.SHOW_ALT_TAB
 import com.android.quickstep.OverviewCommandHelper.CommandType.TOGGLE
@@ -74,6 +76,19 @@ internal constructor(
     @Named(CONNECTION_CLEANER) private val cleanupTasks: ThreadSafeRunnableList,
 ) : Stub() {
     private var state: BindData? = bindData
+    private val focusRouter = AndroidFocusRouter { display ->
+        val current = state
+        current != null && current.lockedUserState.isUserUnlocked &&
+            current.sysUIProxy.focusQueryConnection != null &&
+            current.overviewCommandHelper != null &&
+            current.deviceStateRepository[display]?.let {
+                !it.isScreenPinningActive && it.canStartOverviewCommand()
+            } == true
+    }
+    private val focusConnectionChanged = Runnable {
+        focusRouter.replace(state?.sysUIProxy?.focusQueryConnection)
+    }
+
 
     private inline fun withState(task: BindData.() -> Unit) {
         state?.apply(task)
@@ -81,7 +96,14 @@ internal constructor(
 
     init {
         cleanupTasks.addTask(uiExecutor, quickstepKeyGestureEventsHandler::onDestroy)
-        cleanupTasks.addTask(uiExecutor) { state = null }
+        check(Looper.myLooper() === Looper.getMainLooper())
+        bindData.sysUIProxy.addOnStateChangeListener(focusConnectionChanged)
+        focusConnectionChanged.run()
+        cleanupTasks.addTask(uiExecutor) {
+            bindData.sysUIProxy.removeOnStateChangeListener(focusConnectionChanged)
+            focusRouter.destroy()
+            state = null
+        }
     }
 
     @BinderThread
@@ -98,64 +120,41 @@ internal constructor(
     override fun onTaskbarToggled() = withState { taskbarManager.toggleTaskbarStash() }
 
     @BinderThread
-    override fun onOverviewToggle() = withState {
-        TestLogging.recordEvent(TestProtocol.SEQUENCE_MAIN, "onOverviewToggle")
-        val displayId = focusedDisplayIdForOverviewOnConnectedDisplays()
-        val deviceState = deviceStateRepository[displayId]
-        if (deviceState?.isScreenPinningActive == true) return
-
-        if (deviceState != null && !deviceState.canStartOverviewCommand()) {
-            Log.d(
-                TAG,
-                "onOverviewToggle ignored for display $displayId because the command is blocked",
-            )
-            return
-        }
-        TaskUtils.closeSystemWindowsAsync(
-            ActivityManagerWrapper.CLOSE_SYSTEM_WINDOWS_REASON_RECENTS
-        )
-        overviewCommandHelper?.addCommand(TOGGLE, displayId)
+    override fun onOverviewToggle() {
+        requestOverview(TOGGLE, closeWindows = true)
     }
 
     @BinderThread
-    override fun onOverviewShown(triggeredFromAltTab: Boolean) = withState {
-        val displayId =
-            if (triggeredFromAltTab) focusedDisplayIdForAltTabKqsOnConnectedDisplays()
-            else focusedDisplayIdForOverviewOnConnectedDisplays()
-
-        val deviceState = deviceStateRepository[displayId]
-        if (deviceState != null && !deviceState.canStartOverviewCommand()) {
-            Log.d(
-                TAG,
-                "onOverviewShown ignored for display $displayId because the command is blocked",
-            )
-            return
-        }
-        if (triggeredFromAltTab) {
-            TaskUtils.closeSystemWindowsAsync(
-                ActivityManagerWrapper.CLOSE_SYSTEM_WINDOWS_REASON_RECENTS
-            )
-            overviewCommandHelper?.addCommand(SHOW_ALT_TAB, displayId)
-        } else {
-            overviewCommandHelper?.addCommand(TOGGLE_WITH_FOCUS, displayId)
-        }
+    override fun onOverviewShown(triggeredFromAltTab: Boolean) {
+        requestOverview(if (triggeredFromAltTab) SHOW_ALT_TAB else TOGGLE_WITH_FOCUS,
+            closeWindows = triggeredFromAltTab)
     }
 
     @BinderThread
     override fun onOverviewHidden(triggeredFromAltTab: Boolean, triggeredFromHomeKey: Boolean) {
-        if (!triggeredFromAltTab || triggeredFromHomeKey) return
-        withState {
-            // onOverviewShownFromAltTab hides the overview and ends at the target app
-            val displayId = focusedDisplayIdForAltTabKqsOnConnectedDisplays()
-            val deviceState = deviceStateRepository[displayId]
-            if (deviceState != null && !deviceState.canStartOverviewCommand()) {
-                Log.d(
-                    TAG,
-                    "onOverviewHidden ignored for display $displayId because the command is blocked",
-                )
-                return
+        if (triggeredFromAltTab && !triggeredFromHomeKey)
+            requestOverview(HIDE_ALT_TAB, closeWindows = false)
+    }
+
+    /** Binder ingress is bounded before MAIN post. All callbacks below run synchronously MAIN. */
+    private fun requestOverview(type: CommandType, closeWindows: Boolean) {
+        focusRouter.submit { display ->
+            val captured = state ?: return@submit
+            val incarnation = captured.sysUIProxy.focusQueryConnection ?: return@submit
+            val helper = captured.overviewCommandHelper ?: return@submit
+            // This guard outlives gate.pending. Queue execution + owned late UI callbacks recheck.
+            val executionGuard = {
+                Looper.myLooper() === Looper.getMainLooper() && state === captured &&
+                    captured.sysUIProxy.focusQueryConnection === incarnation &&
+                    captured.lockedUserState.isUserUnlocked &&
+                    captured.deviceStateRepository[display]?.let {
+                        !it.isScreenPinningActive && it.canStartOverviewCommand()
+                    } == true
             }
-            overviewCommandHelper?.addCommand(HIDE_ALT_TAB, displayId)
+            if (!executionGuard()) return@submit
+            if (closeWindows) TaskUtils.closeSystemWindowsAsync(
+                ActivityManagerWrapper.CLOSE_SYSTEM_WINDOWS_REASON_RECENTS)
+            helper.addCommand(type, display, executionGuard = executionGuard)
         }
     }
 
@@ -352,10 +351,6 @@ internal constructor(
         val overviewComponentObserver: OverviewComponentObserver? by overviewComponentObserver
         val actionCornerHandler: ActionCornerHandler? by actionCornerHandler
 
-        fun focusedDisplayIdForOverviewOnConnectedDisplays() =
-            sysUIProxy.focusState.focusedDisplayId
 
-        fun focusedDisplayIdForAltTabKqsOnConnectedDisplays() =
-            sysUIProxy.focusState.focusedDisplayId
     }
 }
