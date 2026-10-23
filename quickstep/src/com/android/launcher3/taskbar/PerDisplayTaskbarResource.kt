@@ -23,6 +23,7 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.content.res.Configuration.configurationDiffToString
+import android.os.Handler
 import android.os.Trace
 import android.util.Log
 import android.view.MotionEvent
@@ -32,6 +33,7 @@ import com.android.app.tracing.TraceUtils
 import com.android.launcher3.dagger.LauncherComponentProvider.appComponent
 import com.android.launcher3.display.LauncherDisplayInfo
 import com.android.launcher3.logging.RecreateTaskbarLatencyLogger
+import com.android.launcher3.taskbar.customization.TaskbarFeatureEvaluator
 import com.android.launcher3.util.Executors.UI_HELPER_EXECUTOR
 import com.android.launcher3.util.Executors.getTaskbarUiThread
 import com.android.launcher3.util.Preconditions
@@ -62,6 +64,40 @@ class PerDisplayTaskbarResource(
         private set
 
     private var isDestroyed = false
+    private val readinessHandler = Handler(getTaskbarUiThread().looper)
+    private var pendingReadiness: Runnable? = null
+
+    /**
+     * Snapshot the exact display dependency before constructing a taskbar.
+     * Its repository and DisplayModel collect decoration changes independently.
+     * Never substitute the phone's evaluator when this display is not ready.
+     */
+    fun taskbarFeatureEvaluatorOrRetry(recreate: Runnable): TaskbarFeatureEvaluator? {
+        Preconditions.assertTaskbarUiThread()
+        pendingReadiness?.let { readinessHandler.removeCallbacks(it) }
+        pendingReadiness = null
+        if (isDestroyed) return null
+        val wm = windowContext.getSystemService(WindowManager::class.java)
+        if (wm == null || !wm.shouldShowSystemDecors(displayId)) {
+            removeTaskbarRootViewFromWindow()
+            return null
+        }
+        val evaluator = TaskbarFeatureEvaluator.INSTANCE.get(windowContext)[displayId]
+        // The native owner can change while the repository constructs the dependency.
+        if (!wm.shouldShowSystemDecors(displayId)) {
+            removeTaskbarRootViewFromWindow()
+            return null
+        }
+        if (evaluator != null) return evaluator
+        debugMsg("taskbar dependency not ready; deferring recreation")
+        val retry = Runnable {
+            pendingReadiness = null
+            if (!isDestroyed) recreate.run()
+        }
+        pendingReadiness = retry
+        readinessHandler.postDelayed(retry, 100)
+        return null
+    }
 
     private var oldConfig = windowContext.resources.configuration
     private var displayChangeSafeClosable: SafeCloseable? = null
@@ -196,9 +232,34 @@ class PerDisplayTaskbarResource(
 
     fun setCurrentTaskbar(activity: TaskbarActivityContext) {
         removeExistingTaskbar()
+        if (isExternalDisplay && isDestroyed) {
+            activity.onDestroy()
+            return
+        }
         taskbar = activity
         if (!isDestroyed) {
-            viewManager.addView(activity.windowLayoutParams)
+            if (isExternalDisplay) {
+                val wm = windowContext.getSystemService(WindowManager::class.java)
+                viewManager.addView(
+                    activity.windowLayoutParams,
+                    admission = {
+                        !isDestroyed && taskbar === activity && !activity.isDestroyed &&
+                            wm?.shouldShowSystemDecors(displayId) == true
+                    },
+                    onRejected = {
+                        if (taskbar === activity) {
+                            // Clear ownership BEFORE controller callbacks can reenter.
+                            taskbar = null
+                            // Retire the old root BEFORE onDestroy can install a replacement.
+                            viewManager.removeView()
+                            rootLayout.removeAllViews()
+                            activity.onDestroy()
+                        }
+                    },
+                )
+            } else {
+                viewManager.addView(activity.windowLayoutParams)
+            }
         }
     }
 
@@ -225,6 +286,8 @@ class PerDisplayTaskbarResource(
 
     override fun cleanup() {
         isDestroyed = true
+        pendingReadiness?.let { readinessHandler.removeCallbacks(it) }
+        pendingReadiness = null
         debugMsg("destroy removeTaskbarRootViewFromWindow")
         removeTaskbarRootViewFromWindow()
 

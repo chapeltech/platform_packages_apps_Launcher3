@@ -341,7 +341,7 @@ public class TopTaskTracker extends ISplitScreenListener.Stub implements TaskSta
                 // the cache. The second to top task may change while the top task is still the
                 // same.
                 TaskInfo[] tasks = TraceHelper.allowIpcs("getCachedTopTask.true", () ->
-                        ActivityManagerWrapper.getInstance().getRunningTasks(true));
+                        ActivityManagerWrapper.getInstance().getRunningTasks(true, displayId));
 
                 // `tasks` ends up as null in launcher robo tests, so fixing the symptom here for
                 //  now instead of introducing a mock / stub.
@@ -358,11 +358,17 @@ public class TopTaskTracker extends ISplitScreenListener.Stub implements TaskSta
             if (mOrderedTaskList.isEmpty()) {
                 RunningTaskInfo[] tasks = TraceHelper.allowIpcs("getCachedTopTask.false", () ->
                         ActivityManagerWrapper.getInstance().getRunningTasks(
-                                false /* filterOnlyVisibleRecents */));
+                                false /* filterOnlyVisibleRecents */, displayId));
                 Collections.addAll(mOrderedTaskList, tasks);
             }
 
-            Stream<TaskInfo> taskStream = mOrderedTaskList.stream()
+            List<TaskInfo> candidates = mOrderedTaskList;
+            if (candidates.stream().noneMatch(info -> ExternalDisplaysKt.getSafeDisplayId(info) == displayId)) {
+                TaskInfo[] tasks = TraceHelper.allowIpcs("getCachedTopTask.displayMiss", () ->
+                        ActivityManagerWrapper.getInstance().getRunningTasks(false, displayId));
+                candidates = tasks == null ? Collections.emptyList() : Arrays.asList(tasks);
+            }
+            Stream<TaskInfo> taskStream = candidates.stream()
                     // Strip the pinned task and recents task.
                     .filter(t -> t.taskId != mPinnedTaskId && !isRecentsTask(t));
             taskStream = taskStream.filter(
